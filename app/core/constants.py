@@ -14,3 +14,7 @@ PROGRESS_BY_STATUS = {
     DocumentStatus.COMPLETED: 100,
     DocumentStatus.FAILED: 0,
 }
+
+
+# How many times we retry a document before giving up.
+MAX_ATTEMPTS  = 3  # how many times a worker will retry a failed document

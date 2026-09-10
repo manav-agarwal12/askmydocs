@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from app.api.deps import get_current_user
 from app.models import User
 from app.worker.celery_app import celery_app
-from app.worker.tasks import boom, count_documents, ping, slow_add
+from app.worker.tasks import boom, claim_next_document, count_documents, ping, slow_add
 
 router = APIRouter(prefix="/debug", tags=["debug"])
 
@@ -55,3 +55,10 @@ def get_task_result(task_id: str, current_user: User = Depends(get_current_user)
         payload["error"] = str(result.result)   # result holds the exception
 
     return payload
+
+
+@router.post("/claim-now")
+def enqueue_claim_now(current_user: User = Depends(get_current_user)):
+    """Fire the claim task immediately instead of waiting for Beat."""
+    task = claim_next_document.delay()
+    return {"task_id": task.id}

@@ -19,3 +19,12 @@ celery_app.conf.update(
     result_expires=3600,                # results self-delete after 1 hour
     broker_connection_retry_on_startup=True,
 )
+
+
+# Celery Beat: the scheduler that fires tasks on a timer.
+celery_app.conf.beat_schedule = {
+    "claim-pending-documents": {
+        "task": "documents.claim_next",
+        "schedule": 30.0,          # seconds
+    },
+}
