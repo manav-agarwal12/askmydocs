@@ -33,3 +33,11 @@ class DocumentOut(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+class ChunkOut(BaseModel):
+    id: int
+    chunk_index: int
+    page_number: int | None
+    text: str
+
+    model_config = ConfigDict(from_attributes=True)

@@ -3,11 +3,15 @@ import time
 from sqlalchemy import func
 
 from app.core.database import SessionLocal
-from app.models import Document
 from app.worker.celery_app import celery_app
 
 from datetime import datetime, timezone
 from app.core.constants import MAX_ATTEMPTS, DocumentStatus
+
+from sqlalchemy.orm import Session
+
+from app.models import Chunk, Document
+from app.services.pdf import chunk_pages, extract_pages
 
 
 @celery_app.task(name="debug.ping")
@@ -78,8 +82,41 @@ def _claim_one_pending() -> int | None:
         db.close()
 
 
+def _process(document: Document, db: Session) -> dict:
+    """The real work. Raises on any problem; the caller records the failure."""
+    pages, total_pages = extract_pages(document.stored_path)
+    chunks = chunk_pages(pages)
+
+    # Idempotency: a retry must not double-insert. Wipe anything a
+    # previous attempt left behind before writing fresh chunks.
+    db.query(Chunk).filter(Chunk.document_id == document.id).delete()
+
+    for chunk in chunks:
+        db.add(
+            Chunk(
+                document_id=document.id,
+                chunk_index=chunk.chunk_index,
+                text=chunk.text,
+                page_number=chunk.page_number,
+                chunk_metadata={"word_count": chunk.word_count},
+            )
+        )
+
+    document.page_count = total_pages
+
+    # Reassign the whole dict. Mutating a JSONB dict in place does not
+    # mark the row dirty, so SQLAlchemy would never save the change.
+    document.doc_metadata = {
+        **(document.doc_metadata or {}),
+        "pages_with_text": len(pages),
+        "chunk_count": len(chunks),
+    }
+
+    return {"pages": total_pages, "chunks": len(chunks)}
+
+
 def _finish(document_id: int) -> dict:
-    """Do the work, then record the outcome. No real work yet."""
+    """Run the work and record the outcome as completed or failed."""
     db = SessionLocal()
     try:
         document = db.get(Document, document_id)
@@ -87,23 +124,25 @@ def _finish(document_id: int) -> dict:
             return {"document_id": document_id, "status": "vanished"}
 
         try:
-            # ---- Day 10-11: real work goes here ----
-            # open the PDF with PyMuPDF, extract text, write chunks
-            time.sleep(3)          # pretend it took a moment
-            document.page_count = 0
-            # ----------------------------------------
-
+            stats = _process(document, db)
             document.status = DocumentStatus.COMPLETED
             document.error_message = None
         except Exception as exc:
+            # Roll back first: the session may be in a broken transaction,
+            # and any half-inserted chunks must go. After a rollback the
+            # object is expired, so re-fetch it before writing the failure.
+            db.rollback()
+            document = db.get(Document, document_id)
             document.status = DocumentStatus.FAILED
             document.error_message = f"{type(exc).__name__}: {exc}"[:1000]
+            stats = {}
 
         db.commit()
         return {
             "document_id": document.id,
             "status": document.status,
             "attempts": document.attempts,
+            **stats,
         }
     finally:
         db.close()

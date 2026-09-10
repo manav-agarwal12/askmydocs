@@ -11,3 +11,4 @@ python-multipart==0.0.9
 celery==5.4.0
 redis==5.1.0
 email-validator==2.2.0
+pymupdf==1.28.2

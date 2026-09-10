@@ -18,3 +18,8 @@ PROGRESS_BY_STATUS = {
 
 # How many times we retry a document before giving up.
 MAX_ATTEMPTS  = 3  # how many times a worker will retry a failed document
+
+# Chunking. English averages ~0.75 words per token, so 375 words is
+# roughly 500 tokens and 38 words is roughly 50 tokens of overlap.
+CHUNK_SIZE_WORDS = 375
+CHUNK_OVERLAP_WORDS = 38

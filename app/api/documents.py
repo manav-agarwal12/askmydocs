@@ -9,7 +9,7 @@ from app.core.constants import PROGRESS_BY_STATUS, DocumentStatus
 from app.core.database import get_db
 from app.core.storage import save_pdf
 from app.models import Chunk, Document, User
-from app.schemas.document import DocumentOut, DocumentStatusOut, UploadAccepted
+from app.schemas.document import DocumentOut, DocumentStatusOut, UploadAccepted, ChunkOut
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -141,3 +141,24 @@ def delete_document(
 
     Path(stored_path).unlink(missing_ok=True)
     return None
+
+
+@router.get("/{document_id}/chunks", response_model=list[ChunkOut])
+def list_chunks(
+    document_id: int,
+    limit: int = 20,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Inspect the chunks produced for a document."""
+    document = _get_owned_document(document_id, db, current_user)
+
+    return (
+        db.query(Chunk)
+        .filter(Chunk.document_id == document.id)
+        .order_by(Chunk.chunk_index)
+        .offset(offset)
+        .limit(min(limit, 100))
+        .all()
+    )
