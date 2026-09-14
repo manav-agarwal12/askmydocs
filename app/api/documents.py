@@ -10,6 +10,8 @@ from app.core.database import get_db
 from app.core.storage import save_pdf
 from app.models import Chunk, Document, User
 from app.schemas.document import DocumentOut, DocumentStatusOut, UploadAccepted, ChunkOut
+from app.services.vectorstore import delete_document_vectors
+
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -63,8 +65,7 @@ def upload_document(
         Path(stored_path).unlink(missing_ok=True)   # no orphan file on disk
         raise
 
-    # Day 7-8: enqueue the Celery task here, e.g.
-    #     process_document.delay(document.id)
+ 
     # The row already says "pending", so the worker has all it needs.
 
     return UploadAccepted(
@@ -135,10 +136,13 @@ def delete_document(
 ):
     document = _get_owned_document(document_id, db, current_user)
     stored_path = document.stored_path
+    user_id = document.user_id          
+    doc_id = document.id
 
     db.delete(document)   # chunks go too, via the cascade on the relationship
     db.commit()
 
+    delete_document_vectors(user_id, doc_id)   # remove from vectorstore too
     Path(stored_path).unlink(missing_ok=True)
     return None
 

@@ -6,12 +6,17 @@ from app.core.database import SessionLocal
 from app.worker.celery_app import celery_app
 
 from datetime import datetime, timezone
-from app.core.constants import MAX_ATTEMPTS, DocumentStatus
+from app.core.constants import MAX_ATTEMPTS, DocumentStatus, STUCK_AFTER_MINUTES
 
 from sqlalchemy.orm import Session
 
 from app.models import Chunk, Document
 from app.services.pdf import chunk_pages, extract_pages
+
+from app.services.embeddings import embed_documents
+from app.services.vectorstore import replace_document_vectors
+
+from datetime import timedelta
 
 
 @celery_app.task(name="debug.ping")
@@ -83,37 +88,63 @@ def _claim_one_pending() -> int | None:
 
 
 def _process(document: Document, db: Session) -> dict:
-    """The real work. Raises on any problem; the caller records the failure."""
+    """Extract, chunk, embed, and store the vectors."""
+
     pages, total_pages = extract_pages(document.stored_path)
     chunks = chunk_pages(pages)
 
-    # Idempotency: a retry must not double-insert. Wipe anything a
-    # previous attempt left behind before writing fresh chunks.
     db.query(Chunk).filter(Chunk.document_id == document.id).delete()
 
+    chunk_rows = []
     for chunk in chunks:
-        db.add(
-            Chunk(
-                document_id=document.id,
-                chunk_index=chunk.chunk_index,
-                text=chunk.text,
-                page_number=chunk.page_number,
-                chunk_metadata={"word_count": chunk.word_count},
-            )
+        row = Chunk(
+            document_id=document.id,
+            chunk_index=chunk.chunk_index,
+            text=chunk.text,
+            page_number=chunk.page_number,
+            chunk_metadata={"word_count": chunk.word_count},
         )
+        db.add(row)
+        chunk_rows.append(row)
+
+    # flush = send the INSERT statements to PostgreSQL without committing.
+    # This assigns IDs to the rows, which we need for ChromaDB vector IDs.
+    db.flush()
+
+    # This calls Gemini to generate embeddings.
+    # It is the slowest step in this process.
+    vectors = embed_documents([chunk.text for chunk in chunks])
+
+    records = [
+        {
+            "chunk_id": row.id,
+            "chunk_index": row.chunk_index,
+            "page_number": row.page_number,
+            "text": row.text,
+            "embedding": vector,
+        }
+        for row, vector in zip(chunk_rows, vectors)
+    ]
+
+    vectors_stored = replace_document_vectors(
+        user_id=document.user_id,
+        document_id=document.id,
+        records=records,
+    )
 
     document.page_count = total_pages
-
-    # Reassign the whole dict. Mutating a JSONB dict in place does not
-    # mark the row dirty, so SQLAlchemy would never save the change.
     document.doc_metadata = {
         **(document.doc_metadata or {}),
         "pages_with_text": len(pages),
         "chunk_count": len(chunks),
+        "vectors_stored": vectors_stored,
     }
 
-    return {"pages": total_pages, "chunks": len(chunks)}
-
+    return {
+        "pages": total_pages,
+        "chunks": len(chunks),
+        "vectors": vectors_stored,
+    }
 
 def _finish(document_id: int) -> dict:
     """Run the work and record the outcome as completed or failed."""
@@ -157,3 +188,58 @@ def claim_next_document() -> dict:
         return {"claimed": None, "reason": "no pending documents"}
 
     return _finish(document_id)
+
+
+@celery_app.task(name="documents.recover_stuck")
+def recover_stuck_documents() -> dict:
+    """Make stuck and failed documents eligible for processing again.
+
+    It does two things:
+      1. Moves documents stuck in "processing" back to "pending"
+      2. Moves failed documents back to "pending" if retry attempts remain
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=STUCK_AFTER_MINUTES)
+
+    db = SessionLocal()
+    try:
+        # --- 1. Stuck documents ---
+        stuck = (
+            db.query(Document)
+            .filter(Document.status == DocumentStatus.PROCESSING)
+            .filter(Document.processing_started_at < cutoff)
+            .all()
+        )
+
+        requeued_stuck = 0
+        for document in stuck:
+            if document.attempts >= MAX_ATTEMPTS:
+                document.status = DocumentStatus.FAILED
+                document.error_message = (
+                    f"Still not completed after {MAX_ATTEMPTS} attempts"
+                )
+            else:
+                document.status = DocumentStatus.PENDING
+                document.processing_started_at = None
+                requeued_stuck += 1
+
+        # --- 2. Failed documents with remaining retry attempts ---
+        retryable = (
+            db.query(Document)
+            .filter(Document.status == DocumentStatus.FAILED)
+            .filter(Document.attempts < MAX_ATTEMPTS)
+            .all()
+        )
+
+        for document in retryable:
+            document.status = DocumentStatus.PENDING
+            document.processing_started_at = None
+
+        db.commit()
+
+        return {
+            "requeued_stuck": requeued_stuck,
+            "requeued_failed": len(retryable),
+            "gave_up": len(stuck) - requeued_stuck,
+        }
+    finally:
+        db.close()

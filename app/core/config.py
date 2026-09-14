@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     GEMINI_API_KEY: str = ""
     UPLOAD_DIR: str = "./uploads"
+    CHROMA_DIR: str = "./chroma_data"
 
     model_config = SettingsConfigDict(env_file=".env")
 

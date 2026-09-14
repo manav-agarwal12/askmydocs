@@ -25,6 +25,10 @@ celery_app.conf.update(
 celery_app.conf.beat_schedule = {
     "claim-pending-documents": {
         "task": "documents.claim_next",
-        "schedule": 30.0,          # seconds
+        "schedule": 30.0,
+    },
+    "recover-stuck-documents": {          # New task
+        "task": "documents.recover_stuck",
+        "schedule": 300.0,                # Every 5 minutes
     },
 }
